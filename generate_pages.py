@@ -1,12 +1,14 @@
 import os
 import sys
+import json
 import urllib.request
 import xml.etree.ElementTree as ET
+import shutil
 
 sitemap_url = sys.argv[1] if len(sys.argv) > 1 else "https://stylesdays.com/sitemap_index.xml"
 print(f"Fetching sitemap from: {sitemap_url}")
 
-def fetch_xml(url):
+def fetch_url(url):
     req = urllib.request.Request(
         url, 
         headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
@@ -22,7 +24,7 @@ def parse_sitemap(url, found_urls=None):
     if found_urls is None:
         found_urls = set()
     
-    xml_data = fetch_xml(url)
+    xml_data = fetch_url(url)
     if not xml_data:
         return found_urls
 
@@ -50,6 +52,41 @@ def parse_sitemap(url, found_urls=None):
 
 all_urls = parse_sitemap(sitemap_url)
 print(f"Total unique URLs found: {len(all_urls)}")
+
+# Fetch WordPress REST API posts to map slugs to real featured images and titles
+wp_posts_map = {}
+page = 1
+while True:
+    api_url = f"https://stylesdays.com/wp-json/wp/v2/posts?per_page=100&page={page}&_embed=1"
+    print(f"Fetching WordPress REST API batch {page}...")
+    data = fetch_url(api_url)
+    if not data:
+        break
+    try:
+        posts = json.loads(data.decode('utf-8'))
+        if not posts:
+            break
+        for p in posts:
+            slug = p.get('slug')
+            title = p.get('title', {}).get('rendered', '')
+            # Extract featured image from _embedded if present
+            img_url = ""
+            try:
+                img_url = p.get('_embedded', {}).get('wp:featuredmedia', [{}])[0].get('source_url', '')
+            except Exception:
+                pass
+            
+            if slug:
+                wp_posts_map[slug] = {
+                    "title": title,
+                    "image": img_url
+                }
+        page += 1
+    except Exception as e:
+        print(f"Error parsing WP API batch {page}: {e}")
+        break
+
+print(f"Loaded {len(wp_posts_map)} posts with metadata from WordPress REST API.")
 
 # High-fidelity Pinterest-Compliant Editorial Hub Template
 EDITORIAL_TEMPLATE = """<!DOCTYPE html>
@@ -89,7 +126,7 @@ EDITORIAL_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body class="min-h-screen flex flex-col selection:bg-[#E60023] selection:text-white">
 
-  <!-- 1. ABOVE-THE-FOLD EDITORIAL & COMMERCIAL DISCLOSURE BANNER (Pinterest Policy Requirement) -->
+  <!-- 1. ABOVE-THE-FOLD EDITORIAL & COMMERCIAL DISCLOSURE BANNER -->
   <div class="w-full bg-[#F1EDE6] border-b border-stone-200/80 text-stone-700 text-xs py-2 px-4">
     <div class="max-w-5xl mx-auto flex flex-wrap items-center justify-between gap-2">
       <div class="flex items-center space-x-2">
@@ -212,18 +249,34 @@ EDITORIAL_TEMPLATE = """<!DOCTYPE html>
 </html>
 """
 
+print("Cleaning up old generated slug folders...")
+# First pass: identify and delete existing folders that match the sitemap slugs
 for url in all_urls:
-    if not url.endswith('/'):
-        url += '/'
-    
-    parts = [p for p in url.split('/') if p]
+    clean_url = url if url.endswith('/') else url + '/'
+    parts = [p for p in clean_url.split('/') if p]
     if len(parts) <= 1:
         continue
     slug = parts[-1]
     
-    title = slug.replace('-', ' ').title()
+    if os.path.exists(slug) and os.path.isdir(slug):
+        shutil.rmtree(slug, ignore_errors=True)
+        print(f"Deleted old folder: /{slug}")
+
+print("Generating new pages...")
+# Second pass: recreate folders and generate index.html
+for url in all_urls:
+    clean_url = url if url.endswith('/') else url + '/'
+    parts = [p for p in clean_url.split('/') if p]
+    if len(parts) <= 1:
+        continue
+    slug = parts[-1]
+    
+    # Check if we have real WP API metadata for this slug
+    wp_data = wp_posts_map.get(slug, {})
+    title = wp_data.get("title") or slug.replace('-', ' ').title()
+    image = wp_data.get("image") or "https://images.unsplash.com/photo-1600166898405-da9535204843?auto=format&fit=crop&w=1200&q=85"
+    
     description = f"Explore {title}. Discover expert tips, ideas, and complete inspiration guides on StylesDays."
-    image = "https://images.unsplash.com/photo-1600166898405-da9535204843?auto=format&fit=crop&w=1200&q=85"
     category = "Home Decor & Styling"
     
     os.makedirs(slug, exist_ok=True)
@@ -239,7 +292,5 @@ for url in all_urls:
     
     with open(file_path, 'w', encoding='utf-8') as f:
         f.write(page_content)
-    
-    print(f"Generated editorial page: /{slug}/index.html")
 
-print("All editorial hub pages successfully generated!")
+print("All editorial hub pages successfully generated with dynamic featured images!")
